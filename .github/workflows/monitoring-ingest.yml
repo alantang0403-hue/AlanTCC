@@ -20,7 +20,7 @@ jobs:
   ingest:
     name: Fetch and archive monitoring data
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 4
 
     steps:
       - name: Request GitHub OIDC token and trigger ingestion
@@ -39,6 +39,12 @@ jobs:
           fi
 
           curl --fail-with-body --silent --show-error \
+            --connect-timeout 15 \
+            --max-time 45 \
+            --retry 3 \
+            --retry-delay 15 \
+            --retry-max-time 150 \
+            --retry-all-errors \
             -X POST \
             -H "Authorization: Bearer ${oidc_token}" \
             -H "Accept: application/json" \
