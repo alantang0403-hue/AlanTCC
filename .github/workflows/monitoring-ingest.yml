@@ -23,6 +23,19 @@ jobs:
     timeout-minutes: 4
 
     steps:
+      - name: Check monitoring source routes
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          https_status="$(curl --location --silent --show-error --output /dev/null \
+            --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
+            'https://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml' || true)"
+          http_status="$(curl --location --silent --show-error --output /dev/null \
+            --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
+            'http://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml' || true)"
+          echo "Monitoring source HTTPS status: ${https_status}"
+          echo "Monitoring source HTTP status: ${http_status}"
+
       - name: Request GitHub OIDC token and trigger ingestion
         shell: bash
         run: |
