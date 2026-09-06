@@ -27,14 +27,19 @@ jobs:
         if: github.event_name == 'push'
         shell: bash
         run: |
-          https_status="$(curl --location --silent --show-error --output /dev/null \
+          echo "A records:"
+          dig +short A swcbapi.monitorsystem.com.tw || true
+          echo "AAAA records:"
+          dig +short AAAA swcbapi.monitorsystem.com.tw || true
+
+          https_status="$(curl -4 --location --silent --show-error --output /dev/null \
             --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
             'https://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml' || true)"
-          http_status="$(curl --location --silent --show-error --output /dev/null \
+          http_status="$(curl -4 --location --silent --show-error --output /dev/null \
             --connect-timeout 10 --max-time 30 --write-out '%{http_code}' \
             'http://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml' || true)"
-          echo "Monitoring source HTTPS status: ${https_status}"
-          echo "Monitoring source HTTP status: ${http_status}"
+          echo "Monitoring source HTTPS IPv4 status: ${https_status}"
+          echo "Monitoring source HTTP IPv4 status: ${http_status}"
 
       - name: Request GitHub OIDC token and trigger ingestion
         shell: bash
