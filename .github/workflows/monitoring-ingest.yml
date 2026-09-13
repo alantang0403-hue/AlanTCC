@@ -12,46 +12,42 @@ permissions:
   contents: read
   id-token: write
 
-concurrency:
-  group: monitoring-ingestion
-  cancel-in-progress: false
-
 jobs:
   ingest:
-    name: Fetch XML in GitHub and archive to monitoring site
+    name: Fetch and archive monitoring data
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 4
 
     steps:
-      - name: Fetch monitoring XML with fallback and validation
+      - name: Probe source directly from GitHub runner
+        id: direct
         shell: bash
         run: |
           set -euo pipefail
-
-          fetched=false
-          for source_url in             "https://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml"             "http://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml"
-          do
-            if curl --fail --silent --show-error               --connect-timeout 12               --max-time 35               --retry 3               --retry-delay 10               --retry-max-time 120               --retry-all-errors               -H "Accept: application/xml,text/xml"               -o monitoring.xml               "${source_url}"; then
-              if grep -q "<file_attribute" monitoring.xml && grep -q "<station" monitoring.xml; then
-                fetched=true
-                break
+          for protocol in https http; do
+            source_url="${protocol}://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml"
+            if curl --ipv4 --fail --silent --show-error \
+              --connect-timeout 5 --max-time 12 \
+              -H "Accept: application/xml,text/xml" \
+              -o monitoring.xml "${source_url}"; then
+              if grep -q '<file_attribute' monitoring.xml && grep -q '<station' monitoring.xml; then
+                echo "available=true" >> "${GITHUB_OUTPUT}"
+                echo "Validated XML from ${protocol} source."
+                exit 0
               fi
             fi
           done
+          echo "Direct source unavailable; falling back to site gateway."
+          echo "available=false" >> "${GITHUB_OUTPUT}"
 
-          if [[ "${fetched}" != "true" ]]; then
-            echo "No valid monitoring XML was returned by either source."
-            exit 1
-          fi
-
-          echo "XML_BYTES=$(wc -c < monitoring.xml)" >> "${GITHUB_ENV}"
-
-      - name: Request GitHub OIDC token and send XML
+      - name: Request GitHub OIDC token and trigger ingestion
         shell: bash
         run: |
           set -euo pipefail
 
-          oidc_response="$(curl --fail --silent --show-error             -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}"             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=miaoli-monitoring-scheduler")"
+          oidc_response="$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=miaoli-monitoring-scheduler")"
 
           oidc_token="$(jq -r '.value // empty' <<< "${oidc_response}")"
           if [[ -z "${oidc_token}" ]]; then
@@ -59,7 +55,22 @@ jobs:
             exit 1
           fi
 
-          curl --fail-with-body --silent --show-error             --connect-timeout 15             --max-time 45             --retry 2             --retry-delay 10             --retry-all-errors             -X POST             -H "Authorization: Bearer ${oidc_token}"             -H "Accept: application/json"             -H "Content-Type: application/xml"             --data-binary @monitoring.xml             "https://miaoli-monitoring-cron-gateway.alantang0403.chatgpt.site/trigger"
+          request_body=()
+          if [[ "${{ steps.direct.outputs.available }}" == "true" ]]; then
+            request_body=(-H "Content-Type: application/xml" --data-binary @monitoring.xml)
+          fi
+
+          curl --fail-with-body --silent --show-error \
+            --connect-timeout 15 \
+            --max-time 45 \
+            --retry 2 \
+            --retry-delay 5 \
+            --retry-max-time 140 \
+            --retry-all-errors \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H "Accept: application/json" \
+            "${request_body[@]}" \
+            "https://miaoli-monitoring-cron-gateway.alantang0403.chatgpt.site/trigger"
 
           echo
-          echo "Archived ${XML_BYTES} bytes."
