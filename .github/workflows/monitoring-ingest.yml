@@ -5,18 +5,23 @@ on:
     branches:
       - main
   schedule:
-    - cron: "*/10 * * * *"
+    # Avoid the top of the hour, when GitHub Actions scheduled jobs are most likely to be delayed.
+    - cron: "3,13,23,33,43,53 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: monitoring-ingestion
+  cancel-in-progress: false
+
 jobs:
   ingest:
     name: Fetch and archive monitoring data
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 8
 
     steps:
       - name: Probe source directly from GitHub runner
@@ -24,20 +29,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for protocol in https http; do
-            source_url="${protocol}://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml"
-            if curl --ipv4 --fail --silent --show-error \
-              --connect-timeout 5 --max-time 12 \
-              -H "Accept: application/xml,text/xml" \
-              -o monitoring.xml "${source_url}"; then
-              if grep -q '<file_attribute' monitoring.xml && grep -q '<station' monitoring.xml; then
-                echo "available=true" >> "${GITHUB_OUTPUT}"
-                echo "Validated XML from ${protocol} source."
-                exit 0
+          for round in 1 2; do
+            for protocol in https http; do
+              source_url="${protocol}://swcbapi.monitorsystem.com.tw/dsmon/am/10min_a_ds_data.xml"
+              if curl --ipv4 --fail --silent --show-error \
+                --connect-timeout 4 --max-time 12 \
+                -H "Accept: application/xml,text/xml" \
+                -H "User-Agent: Miaoli-Landslide-Monitor/1.0" \
+                -o monitoring.xml "${source_url}"; then
+                if grep -q '<file_attribute' monitoring.xml && grep -q '<station' monitoring.xml; then
+                  echo "available=true" >> "${GITHUB_OUTPUT}"
+                  echo "Validated XML from ${protocol} source (round ${round})."
+                  exit 0
+                fi
               fi
-            fi
+            done
+            sleep $((round * 4))
           done
-          echo "Direct source unavailable; falling back to site gateway."
+          echo "Direct source unavailable; gateway will perform three additional retry rounds."
           echo "available=false" >> "${GITHUB_OUTPUT}"
 
       - name: Request GitHub OIDC token and trigger ingestion
@@ -60,17 +69,27 @@ jobs:
             request_body=(-H "Content-Type: application/xml" --data-binary @monitoring.xml)
           fi
 
-          curl --fail-with-body --silent --show-error \
+          set +e
+          http_code="$(curl --silent --show-error \
             --connect-timeout 15 \
-            --max-time 45 \
-            --retry 2 \
-            --retry-delay 5 \
-            --retry-max-time 140 \
-            --retry-all-errors \
+            --max-time 120 \
             -X POST \
             -H "Authorization: Bearer ${oidc_token}" \
             -H "Accept: application/json" \
             "${request_body[@]}" \
-            "https://miaoli-monitoring-cron-gateway.alantang0403.chatgpt.site/trigger"
+            --output gateway-response.json \
+            --write-out "%{http_code}" \
+            "https://miaoli-monitoring-cron-gateway.alantang0403.chatgpt.site/trigger")"
+          curl_status=$?
+          set -e
 
+          cat gateway-response.json 2>/dev/null || true
           echo
+          if [[ ${curl_status} -ne 0 ]]; then
+            echo "Gateway request failed (curl status ${curl_status})."
+            exit 1
+          fi
+          if [[ "${http_code}" != "200" ]] || ! jq -e '.ok == true' gateway-response.json >/dev/null 2>&1; then
+            echo "Monitoring ingestion did not succeed (HTTP ${http_code})."
+            exit 1
+          fi
