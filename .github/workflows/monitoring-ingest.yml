@@ -1,4 +1,5 @@
 name: Monitoring ingestion
+# Gateway v6 records source failures and retries both protocols.
 
 on:
   push:
